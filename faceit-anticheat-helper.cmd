@@ -44,14 +44,14 @@ echo    %BLD%[2]%CLR%  Scan and fix       %DIM%report, then ask about each item%
 echo    %BLD%[3]%CLR%  Open the log file
 echo    %BLD%[4]%CLR%  Exit
 echo.
-echo   %DIM%Log: %LOGFILE%%CLR%
+echo(  %DIM%Log: !LOGFILE!%CLR%
 echo.
 set "CH="
 set /p "CH=  Choose [1-4]: "
-if "%CH%"=="1" goto :run_scan_only
-if "%CH%"=="2" goto :run_scan_fix
-if "%CH%"=="3" goto :open_log
-if "%CH%"=="4" exit /b 0
+if "!CH!"=="1" goto :run_scan_only
+if "!CH!"=="2" goto :run_scan_fix
+if "!CH!"=="3" goto :open_log
+if "!CH!"=="4" exit /b 0
 set /a MENU_MISSES+=1
 if %MENU_MISSES% GEQ 10 (
     echo.
@@ -90,7 +90,8 @@ call :banner
 call :scan
 call :summary
 
-if %CNT_FIXABLE% EQU 0 (
+set /a _todo=CNT_FIXABLE+CNT_OPTIONAL
+if !_todo! EQU 0 (
     echo   Nothing here can be changed from inside Windows.
     echo.
     call :anykey
@@ -101,13 +102,10 @@ call :rule
 echo   %BLD%APPLYING FIXES%CLR%
 call :rule
 echo.
-echo   %CNT_FIXABLE% item^(s^) can be changed from Windows. You will be asked
+echo   !_todo! item^(s^) can be changed from Windows. You will be asked
 echo   about each one. Answer %BLD%A%CLR% to accept the rest without asking.
 
-set "APPLY_ALL=0"
-set "REBOOT_NEEDED=0"
-set "CNT_APPLIED=0"
-set "CNT_FAILED=0"
+for %%v in (APPLY_ALL REBOOT_NEEDED CNT_APPLIED CNT_FAILED) do set "%%v=0"
 
 call :fix_all
 
@@ -128,9 +126,14 @@ if "%REBOOT_NEEDED%"=="1" (
     call :ask "  Restart now?"
     if /i "!ANS!"=="Y" (
         call :log "User chose to restart."
-        shutdown /r /t 10 /c "Restarting to apply FACEIT Anticheat Helper changes."
+        shutdown /r /t 10 /c "Restarting to apply FACEIT Anticheat Helper changes." >nul 2>&1
+        set "RC=!errorlevel!"
         echo.
-        echo   Restarting in 10 seconds. Type  shutdown /a  to cancel.
+        if "!RC!"=="0" (
+            echo   Restarting in 10 seconds. Type  shutdown /a  to cancel.
+        ) else (
+            echo   %RED%Windows refused to schedule the restart.%CLR% Restart manually.
+        )
         call :anykey
         exit /b 0
     )
@@ -146,14 +149,8 @@ goto :menu
 
 
 :scan
-set "CNT_OK=0"
-set "CNT_FAIL=0"
-set "CNT_WARN=0"
-set "CNT_FIXABLE=0"
-set "BIOS_WORK=0"
-set "LEGACY_BOOT="
-set "BIOS_SECUREBOOT="
-set "BIOS_TPM="
+for %%v in (CNT_OK CNT_FAIL CNT_WARN CNT_FIXABLE CNT_OPTIONAL BIOS_WORK) do set "%%v=0"
+for %%v in (LEGACY_BOOT BIOS_SECUREBOOT BIOS_TPM) do set "%%v="
 
 for %%F in (TESTSIGNING NOINTEGRITY DEBUG FLIGHTSIGN LOADOPTIONS SAFEBOOT HYPERVISOR VBS HVCI BLOCKLIST POLICY) do set "NEED_%%F=0"
 
@@ -215,7 +212,6 @@ if /i "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
     call :row OK "Architecture" "64-bit ARM64"
 ) else (
     call :row FAIL "Architecture" "%PROCESSOR_ARCHITECTURE% - FACEIT AC needs 64-bit Windows"
-    set /a BIOS_WORK+=1
 )
 
 if !OS_BUILD! GEQ 22000 (
@@ -226,7 +222,6 @@ if !OS_BUILD! GEQ 22000 (
     call :row WARN "Supported build" "Windows 10 older than 1809 - update Windows"
 ) else (
     call :row FAIL "Supported build" "older than Windows 10 - FACEIT AC will not run"
-    set /a BIOS_WORK+=1
 )
 
 set "IS_UEFI=0"
@@ -260,7 +255,6 @@ for %%V in (VMware VirtualBox innotek QEMU Parallels KVM Bochs "Virtual Machine"
 )
 if defined VM_HIT (
     call :row FAIL "Physical machine" "virtual machine detected - !VM_HIT! - FACEIT AC blocks VMs"
-    set /a BIOS_WORK+=1
 ) else (
     set "HW_TEXT=!SYS_MFR! !SYS_PRD!"
     if "!HW_TEXT!"==" " set "HW_TEXT=hardware not reported"
@@ -285,15 +279,14 @@ if "!RVERR!"=="1" (
 
 set "TPM_VER="
 set "TPM_SRC="
-
-if "%HAS_PS%"=="1" (
-    for /f "usebackq delims=," %%a in (`powershell -NoProfile -NonInteractive -Command "try{(Get-CimInstance -Namespace root\cimv2\security\microsofttpm -ClassName Win32_Tpm -EA Stop).SpecVersion}catch{''}" 2^>nul`) do set "TPM_VER=%%a"
+if not "!PS_TPM!"=="-" (
+    for /f "tokens=1 delims=," %%a in ("!PS_TPM!") do set "TPM_VER=%%a"
     if defined TPM_VER set "TPM_SRC=WMI"
 )
 if not defined TPM_VER (
     if exist "%SYSDIR%\tpmtool.exe" (
         tpmtool getdeviceinformation > "%WORKDIR%\tpm.txt" 2>nul
-        findstr /c:"2.0" "%WORKDIR%\tpm.txt" >nul 2>&1
+        findstr /i /r /c:"TPM Version: *2\." "%WORKDIR%\tpm.txt" >nul 2>&1
         if not errorlevel 1 (
             set "TPM_VER=2.0"
             set "TPM_SRC=tpmtool"
@@ -324,9 +317,7 @@ if not defined TPM_VER (
 )
 
 if "%HAS_PS%"=="1" (
-    set "VT_FW="
-    for /f "usebackq delims=" %%a in (`powershell -NoProfile -NonInteractive -Command "try{[string](Get-CimInstance Win32_ComputerSystem -EA Stop).HypervisorPresent}catch{''}" 2^>nul`) do set "VT_FW=%%a"
-    if /i "!VT_FW!"=="True" (
+    if /i "!PS_HYPERV!"=="True" (
         call :row OK "CPU virtualization" "hypervisor running, so VT-x/AMD-V is on"
     ) else (
         call :row WARN "CPU virtualization" "hypervisor not running - enable VT-x or SVM in BIOS if VBS fails"
@@ -353,9 +344,7 @@ call :bcd_absent "safeboot"          "Safe mode boot flag" SAFEBOOT    "the mach
 set "HLT="
 for /f "tokens=1,*" %%a in ('findstr /i /r /c:"^hypervisorlaunchtype " "%BCDFILE%" 2^>nul') do set "HLT=%%b"
 if not defined HLT (
-    call :row WARN "Hypervisor launch type" "not configured - VBS and HVCI cannot start"
-    set "NEED_HYPERVISOR=1"
-    set /a CNT_FIXABLE+=1
+    call :row OK "Hypervisor launch type" "Auto, the BCD default"
 ) else (
     for /f "tokens=*" %%x in ("!HLT!") do set "HLT=%%x"
     call :contains "!HLT!" "Auto"
@@ -378,6 +367,8 @@ set "DGP=HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceGuard"
 call :regval "%DG%" "EnableVirtualizationBasedSecurity"
 if /i "!RV!"=="0x1" (
     call :row OK "VBS configured" "EnableVirtualizationBasedSecurity = 1"
+) else if "!PS_VBS!"=="2" (
+    call :row OK "VBS configured" "running on Windows defaults, no override needed"
 ) else (
     call :row WARN "VBS configured" "not enabled"
     set "NEED_VBS=1"
@@ -387,6 +378,8 @@ if /i "!RV!"=="0x1" (
 call :regval "%DGS%" "Enabled"
 if /i "!RV!"=="0x1" (
     call :row OK "Memory Integrity, HVCI" "configured on"
+) else if "!HVCI_RUN!"=="1" (
+    call :row OK "Memory Integrity, HVCI" "running on Windows defaults"
 ) else (
     call :row WARN "Memory Integrity, HVCI" "not enabled"
     set "NEED_HVCI=1"
@@ -419,7 +412,7 @@ if "!POL_OK!"=="1" (
 ) else (
     call :row INFO "Enforced by Group Policy" "not enforced - optional"
     set "NEED_POLICY=1"
-    set /a CNT_FIXABLE+=1
+    set /a CNT_OPTIONAL+=1
 )
 goto :eof
 
@@ -432,12 +425,7 @@ if not "%HAS_PS%"=="1" (
     goto :eof
 )
 
-set "VBS_STAT="
-set "SVC_RUN="
-for /f "usebackq tokens=1,2 delims=#" %%x in (`powershell -NoProfile -NonInteractive -Command "try{$d=Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard -EA Stop;'{0}#{1}' -f $d.VirtualizationBasedSecurityStatus,($d.SecurityServicesRunning -join '.')}catch{''}" 2^>nul`) do (
-    set "VBS_STAT=%%x"
-    set "SVC_RUN=%%y"
-)
+set "VBS_STAT=!PS_VBS!"
 
 if "!VBS_STAT!"=="2" (
     call :row OK "VBS running" "active"
@@ -449,21 +437,14 @@ if "!VBS_STAT!"=="2" (
     call :row INFO "VBS running" "could not be determined"
 )
 
-set "HVCI_RUN=0"
-if defined SVC_RUN (
-    call :contains "!SVC_RUN!" "2"
-    if "!FOUND!"=="1" set "HVCI_RUN=1"
-)
 if "!HVCI_RUN!"=="1" (
     call :row OK "Memory Integrity running" "active"
 ) else (
     call :row WARN "Memory Integrity running" "not active"
 )
 
-set "SB_PS="
-for /f "usebackq delims=" %%a in (`powershell -NoProfile -NonInteractive -Command "try{[string](Confirm-SecureBootUEFI)}catch{''}" 2^>nul`) do set "SB_PS=%%a"
-if /i "!SB_PS!"=="True" call :row OK "Secure Boot, UEFI query" "confirmed enabled"
-if /i "!SB_PS!"=="False" call :row FAIL "Secure Boot, UEFI query" "confirmed disabled"
+if /i "!PS_SB!"=="True" call :row OK "Secure Boot, UEFI query" "confirmed enabled"
+if /i "!PS_SB!"=="False" call :row FAIL "Secure Boot, UEFI query" "confirmed disabled"
 goto :eof
 
 
@@ -520,31 +501,11 @@ goto :eof
 
 :fix_all
 
-if "%NEED_TESTSIGNING%"=="1" (
-    call :fix_head "Turn off test signing" "Lets unsigned drivers load. FACEIT AC will not start while this is on."
-    call :confirm
-    if /i "!ANS!"=="Y" call :bcd_clear "testsigning" "Test signing"
-)
-if "%NEED_NOINTEGRITY%"=="1" (
-    call :fix_head "Re-enable kernel integrity checks" "nointegritychecks switches off driver signature verification entirely."
-    call :confirm
-    if /i "!ANS!"=="Y" call :bcd_clear "nointegritychecks" "Integrity checks"
-)
-if "%NEED_DEBUG%"=="1" (
-    call :fix_head "Turn off kernel debugging" "An attachable kernel debugger is an instant anti-cheat block."
-    call :confirm
-    if /i "!ANS!"=="Y" call :bcd_clear "debug" "Kernel debugging"
-)
-if "%NEED_FLIGHTSIGN%"=="1" (
-    call :fix_head "Turn off flight signing" "Makes Windows accept pre-release driver signatures."
-    call :confirm
-    if /i "!ANS!"=="Y" call :bcd_clear "flightsigning" "Flight signing"
-)
-if "%NEED_LOADOPTIONS%"=="1" (
-    call :fix_head "Clear custom kernel load options" "Usually DISABLE_INTEGRITY_CHECKS left behind by a driver hack."
-    call :confirm
-    if /i "!ANS!"=="Y" call :bcd_clear "loadoptions" "Custom load options"
-)
+call :fix_bcd TESTSIGNING "testsigning" "Test signing" "Turn off test signing" "Lets unsigned drivers load. FACEIT AC will not start while this is on."
+call :fix_bcd NOINTEGRITY "nointegritychecks" "Integrity checks" "Re-enable kernel integrity checks" "nointegritychecks switches off driver signature verification entirely."
+call :fix_bcd DEBUG "debug" "Kernel debugging" "Turn off kernel debugging" "An attachable kernel debugger is an instant anti-cheat block."
+call :fix_bcd FLIGHTSIGN "flightsigning" "Flight signing" "Turn off flight signing" "Makes Windows accept pre-release driver signatures."
+call :fix_bcd LOADOPTIONS "loadoptions" "Custom load options" "Clear custom kernel load options" "Usually DISABLE_INTEGRITY_CHECKS left behind by a driver hack."
 if "%NEED_SAFEBOOT%"=="1" (
     call :fix_head "Clear the Safe Mode boot flag" "The machine is set to always boot into Safe Mode."
     call :confirm
@@ -603,6 +564,14 @@ if "%NEED_POLICY%"=="1" (
         call :step "Policy: HypervisorEnforcedCodeIntegrity = 2" reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceGuard" /v HypervisorEnforcedCodeIntegrity /t REG_DWORD /d 2 /f
     )
 )
+goto :eof
+
+
+:fix_bcd
+if not "!NEED_%~1!"=="1" goto :eof
+call :fix_head "%~4" "%~5"
+call :confirm
+if /i "!ANS!"=="Y" call :bcd_clear "%~2" "%~3"
 goto :eof
 
 
@@ -669,17 +638,19 @@ goto :eof
 :bcd_clear
 bcdedit /deletevalue "{current}" %~1 >nul 2>&1
 set "RC=!errorlevel!"
+set "GONE=0"
 bcdedit /enum "{current}" 2>nul | findstr /i /r /c:"^%~1 " >nul 2>&1
-if errorlevel 1 (
+if errorlevel 1 set "GONE=1"
+if "!RC!"=="0" if "!GONE!"=="1" (
     echo      %GRN%[ done ]%CLR% %~2 removed from the boot configuration
     call :log "APPLIED bcd deletevalue %~1"
     set /a CNT_APPLIED+=1
     set "REBOOT_NEEDED=1"
-) else (
-    echo      %RED%[FAILED]%CLR% %~2 is still set   %DIM%exit code !RC!%CLR%
-    call :log "FAILED  bcd deletevalue %~1  exit !RC!"
-    set /a CNT_FAILED+=1
+    goto :eof
 )
+echo      %RED%[FAILED]%CLR% %~2 is still set   %DIM%exit code !RC!%CLR%
+call :log "FAILED  bcd deletevalue %~1  exit !RC!"
+set /a CNT_FAILED+=1
 goto :eof
 
 
@@ -698,21 +669,13 @@ goto :eof
 :row
 set "_n=%~2                                     "
 set "_n=!_n:~0,31!"
+set "_d=%~3"
 set "_s=%CYN%[ -- ]%CLR%"
-if /i "%~1"=="OK" (
-    set "_s=%GRN%[ OK ]%CLR%"
-    set /a CNT_OK+=1
-)
-if /i "%~1"=="WARN" (
-    set "_s=%YEL%[WARN]%CLR%"
-    set /a CNT_WARN+=1
-)
-if /i "%~1"=="FAIL" (
-    set "_s=%RED%[FAIL]%CLR%"
-    set /a CNT_FAIL+=1
-)
-echo   !_s!  !_n! %DIM%%~3%CLR%
-call :log "  [%~1] %~2 : %~3"
+if /i "%~1"=="OK" (set "_s=%GRN%[ OK ]%CLR%" & set /a CNT_OK+=1)
+if /i "%~1"=="WARN" (set "_s=%YEL%[WARN]%CLR%" & set /a CNT_WARN+=1)
+if /i "%~1"=="FAIL" (set "_s=%RED%[FAIL]%CLR%" & set /a CNT_FAIL+=1)
+echo(  !_s!  !_n! %DIM%!_d!%CLR%
+call :log "  [%~1] %~2 : !_d!"
 goto :eof
 
 :section
@@ -755,7 +718,8 @@ goto :eof
 
 :log
 if not defined LOGFILE goto :eof
->>"%LOGFILE%" echo(%~1
+set "_l=%~1"
+>>"%LOGFILE%" echo(!_l!
 goto :eof
 
 
@@ -835,7 +799,7 @@ set /a "_ct0=CLK"
 for /l %%z in (1,1,%_cn%) do rem
 call :clock_now
 set /a "_cel=(CLK-_ct0)*10"
-if %_cel% LSS 0 set /a "_cel=_cel+864000000"
+if %_cel% LSS 0 set /a "_cel=_cel+86400000"
 if %_cel% LSS 80 (
     set /a "_cn=_cn*4"
     if !_cn! LSS 40000000 goto :cal_try
@@ -846,7 +810,7 @@ if %SPIN% LSS 200 set "SPIN=200"
 if %SPIN% GTR 4000000 set "SPIN=4000000"
 goto :eof
 :clock_now
-for /f "tokens=1-4 delims=:., " %%a in ("!TIME!") do set /a "CLK=(((1%%a-100)*60+(1%%b-100))*60+(1%%c-100))*100+(1%%d-100)"
+for /f "tokens=1-4 delims=:., " %%a in ("!TIME!") do set /a "CLK=(((100%%a %% 100)*60+(100%%b %% 100))*60+(100%%c %% 100))*100+(100%%d %% 100)"
 goto :eof
 
 :strlen
@@ -886,8 +850,23 @@ if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "REG64=/reg:64"
 reg query "HKLM\SOFTWARE" %REG64% >nul 2>&1 || set "REG64="
 
 set "HAS_PS=0"
-for /f "usebackq delims=" %%a in (`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "'ok'" 2^>nul`) do (
-    if /i "%%a"=="ok" set "HAS_PS=1"
+set "PS_TPM=-"
+set "PS_HYPERV=-"
+set "PS_VBS=-"
+set "PS_SVC=-"
+set "PS_SB=-"
+for /f "usebackq tokens=1-5 delims=#" %%a in (`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$t='-';$h='-';$v='-';$s='-';$b='-';try{$x=(Get-CimInstance -Namespace root\cimv2\security\microsofttpm -ClassName Win32_Tpm -EA Stop).SpecVersion;if($x){$t=$x}}catch{};try{$x=[string](Get-CimInstance Win32_ComputerSystem -EA Stop).HypervisorPresent;if($x){$h=$x}}catch{};try{$d=Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard -EA Stop;$v=[string]$d.VirtualizationBasedSecurityStatus;$x=($d.SecurityServicesRunning -join '.');if($x){$s=$x}}catch{};try{$x=[string](Confirm-SecureBootUEFI);if($x){$b=$x}}catch{};'{0}#{1}#{2}#{3}#{4}' -f $t,$h,$v,$s,$b" 2^>nul`) do (
+    set "HAS_PS=1"
+    set "PS_TPM=%%a"
+    set "PS_HYPERV=%%b"
+    set "PS_VBS=%%c"
+    set "PS_SVC=%%d"
+    set "PS_SB=%%e"
+)
+set "HVCI_RUN=0"
+if not "!PS_SVC!"=="-" (
+    call :contains "!PS_SVC!" "2"
+    if "!FOUND!"=="1" set "HVCI_RUN=1"
 )
 
 set "WORKDIR=%TEMP%\faceit-anticheat-helper"
@@ -896,16 +875,10 @@ if not exist "%WORKDIR%" set "WORKDIR=%TEMP%"
 
 set "LOGFILE=%~dp0faceit-anticheat-helper.log"
 set "WTEST=%~dp0faceit-anticheat-helper.tmp"
->"%WTEST%" echo( 2>nul || set "LOGFILE=%WORKDIR%\faceit-anticheat-helper.log"
+copy /y nul "%WTEST%" >nul 2>&1 || set "LOGFILE=%WORKDIR%\faceit-anticheat-helper.log"
 del /q "%WTEST%" >nul 2>&1
 
-set "CLR="
-set "GRN="
-set "RED="
-set "YEL="
-set "CYN="
-set "DIM="
-set "BLD="
+for %%v in (CLR GRN RED YEL CYN DIM BLD) do set "%%v="
 call :regval "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" "CurrentBuild"
 set "B=!RV!"
 if not defined B set "B=0"
@@ -916,13 +889,9 @@ goto :eof
 set "ESC="
 for /f %%a in ('echo prompt $E ^| %ComSpec%') do set "ESC=%%a"
 if not defined ESC goto :eof
-set "CLR=%ESC%[0m"
-set "GRN=%ESC%[92m"
-set "RED=%ESC%[91m"
-set "YEL=%ESC%[93m"
-set "CYN=%ESC%[96m"
-set "DIM=%ESC%[90m"
-set "BLD=%ESC%[1m"
+for %%v in ("CLR=0" "GRN=92" "RED=91" "YEL=93" "CYN=96" "DIM=90" "BLD=1") do (
+    for /f "tokens=1,2 delims==" %%x in (%%v) do set "%%x=%ESC%[%%ym"
+)
 goto :eof
 
 
@@ -935,7 +904,7 @@ echo   Requesting elevation...
 
 if exist "%SYSDIR%\WindowsPowerShell\v1.0\powershell.exe" (
     powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -ArgumentList '/elevated' -Verb RunAs" >nul 2>&1
-    if not errorlevel 1 exit /b 0
+    exit /b 0
 )
 
 set "VBSFILE=%TEMP%\faceit_elevate.vbs"
