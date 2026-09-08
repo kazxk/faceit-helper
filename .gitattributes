@@ -1,0 +1,4 @@
+# cmd.exe misreads a batch file with LF endings: labels resolve wrong and the
+# script reports incorrect results instead of failing. Force CRLF on checkout
+# no matter the platform or the user's core.autocrlf setting.
+*.cmd text eol=crlf
